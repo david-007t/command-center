@@ -41,8 +41,6 @@ export async function loadProjectPageData(projectName: string) {
   if (isSupabaseConfigured()) {
     const stored = await readProjectPageDataFromStore(projectName, developerPath)
     if (stored?.projectStatus) {
-      await fs.access(getProjectFilePath(developerPath, projectName, "TASKS.md"))
-
       return {
         projectStatus: stored.projectStatus,
         contextPack: stored.contextPack,
