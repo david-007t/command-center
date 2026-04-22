@@ -29,12 +29,10 @@ export async function loadProjectPageData(projectName: string) {
   if (isSupabaseConfigured()) {
     const stored = await readProjectPageDataFromStore(projectName, developerPath)
     if (stored?.projectStatus) {
-      await fs.access(getProjectFilePath(developerPath, projectName, "TASKS.md"))
-
       const tabs: Record<string, string> = {}
       for (const item of FILES) {
         const filePath = getProjectFilePath(developerPath, projectName, item.file)
-        tabs[item.label] = await fs.readFile(filePath, "utf8").catch(() => `${item.file} not found.`)
+        tabs[item.label] = await fs.readFile(filePath, "utf8").catch(() => `${item.file} is not available in the cloud runtime.`)
       }
 
       return {

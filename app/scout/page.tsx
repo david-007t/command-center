@@ -8,6 +8,8 @@ import { buildDailyScoutBrief } from "@/lib/scout-engine"
 import { syncSystemImprovements } from "@/lib/system-improvements"
 import { summarizeUsage } from "@/lib/usage-telemetry"
 
+export const dynamic = "force-dynamic"
+
 function parseScoutReport(fileName: string, contents: string) {
   const lines = contents.split("\n")
   const newTools = lines
