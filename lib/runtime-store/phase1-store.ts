@@ -21,7 +21,7 @@ import { deleteRows, insertRows, selectRows, updateRows, upsertRows } from "@/li
 import { syncSystemImprovements } from "@/lib/system-improvements"
 import { summarizeUsage } from "@/lib/usage-telemetry"
 import { getVercelDeploymentLinks } from "@/lib/vercel-deployments"
-import { mapSupabaseRunToRuntimeJob, type SupabaseRunRow } from "../inngest-run-store"
+import { expireStaleActiveRuns, expireStaleQueuedRuns, mapSupabaseRunToRuntimeJob, type SupabaseRunRow } from "../inngest-run-store"
 import {
   buildPortfolioResponseFromStore,
   mergeThreadMessagesPreservingRunEvents,
@@ -60,6 +60,14 @@ type MessageRow = {
 }
 
 let seedPromise: Promise<void> | null = null
+
+async function expireStaleRunsBeforeRead(projectName?: string) {
+  if (!isSupabaseConfigured()) return
+  await Promise.all([
+    expireStaleQueuedRuns(projectName).catch(() => 0),
+    expireStaleActiveRuns(projectName).catch(() => 0),
+  ])
+}
 
 function parsePortfolio(markdown: string) {
   const queueSection = markdown.match(/## Build queue([\s\S]*?)(\n## |$)/)?.[1] ?? ""
@@ -350,6 +358,7 @@ export async function ensurePhase1StoreSeeded(developerPath = getDeveloperPath()
 
 export async function readPortfolioFromStore(developerPath = getDeveloperPath()) {
   await ensurePhase1StoreSeeded(developerPath)
+  await expireStaleRunsBeforeRead()
   const rows = await selectRows<Phase1ProjectRow>("projects", {
     select: "id,name,display_name,metadata",
     order: "created_at.asc",
@@ -377,6 +386,7 @@ export async function readPortfolioFromStore(developerPath = getDeveloperPath())
 
 export async function readProjectStatusFromStore(projectName: string, developerPath = getDeveloperPath()) {
   await ensurePhase1StoreSeeded(developerPath)
+  await expireStaleRunsBeforeRead(projectName)
   const [row] = await selectRows<Phase1ProjectRow>("projects", {
     select: "id,name,display_name,metadata",
     filters: { name: projectName },
@@ -454,6 +464,7 @@ export async function readProjectStatusFromStore(projectName: string, developerP
 
 export async function readProjectPageDataFromStore(projectName: string, developerPath = getDeveloperPath()) {
   await ensurePhase1StoreSeeded(developerPath)
+  await expireStaleRunsBeforeRead(projectName)
   const [row] = await selectRows<Phase1ProjectRow>("projects", {
     select: "id,name,display_name,metadata",
     filters: { name: projectName },
@@ -537,6 +548,7 @@ async function refreshStoredProjectRuntime<T extends ReturnType<typeof projectRo
 }
 
 async function listFastProjectJobs(projectName: string) {
+  await expireStaleRunsBeforeRead(projectName)
   const rows = await selectRows<SupabaseRunRow>("runs", {
     select: "id,project_id,thread_id,run_template,instruction,status,current_stage,summary,created_at,started_at,completed_at,metadata",
     order: "created_at.desc",
