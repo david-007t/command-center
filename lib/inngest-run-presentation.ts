@@ -86,10 +86,41 @@ export function mapSupabaseRunToRuntimeJob(
     pid: null,
     currentStage: row.current_stage as RuntimeJob["currentStage"],
     stageUpdatedAt:
-      typeof metadata.stageUpdatedAt === "string"
-        ? metadata.stageUpdatedAt
-        : row.completed_at ?? row.started_at ?? row.created_at,
+      row.status === "running" && typeof metadata.lastHeartbeatAt === "string"
+        ? metadata.lastHeartbeatAt
+        : typeof metadata.stageUpdatedAt === "string"
+          ? metadata.stageUpdatedAt
+          : row.completed_at ?? row.started_at ?? row.created_at,
   }
+}
+
+export function isStaleQueuedRun(row: Pick<SupabaseRunRow, "status" | "started_at" | "created_at">, now = new Date(), timeoutMs = 10 * 60 * 1000) {
+  if (row.status !== "queued" || row.started_at) return false
+  const createdAtMs = Date.parse(row.created_at)
+  if (!Number.isFinite(createdAtMs)) return false
+  return now.getTime() - createdAtMs > timeoutMs
+}
+
+function metadataTimestamp(metadata: Record<string, unknown> | null | undefined, key: string) {
+  const value = metadata?.[key]
+  if (typeof value !== "string") return null
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+export function isStaleActiveRun(
+  row: Pick<SupabaseRunRow, "status" | "started_at" | "metadata">,
+  now = new Date(),
+  timeoutMs = 6 * 60 * 1000,
+) {
+  if (row.status !== "running") return false
+  const lastHeartbeatMs =
+    metadataTimestamp(row.metadata, "lastHeartbeatAt") ??
+    metadataTimestamp(row.metadata, "latestActivityAt") ??
+    metadataTimestamp(row.metadata, "stageUpdatedAt") ??
+    (row.started_at ? Date.parse(row.started_at) : null)
+  if (!lastHeartbeatMs || !Number.isFinite(lastHeartbeatMs)) return false
+  return now.getTime() - lastHeartbeatMs > timeoutMs
 }
 
 export function assertEvidenceBeforeDone(params: {

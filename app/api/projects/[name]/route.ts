@@ -6,6 +6,8 @@ import { readProjectStatusFromStore } from "@/lib/runtime-store/phase1-store"
 import { isSupabaseConfigured } from "@/lib/supabase/env"
 import { summarizeUsage } from "@/lib/usage-telemetry"
 
+export const dynamic = "force-dynamic"
+
 export async function GET(
   _request: Request,
   { params }: { params: { name: string } },

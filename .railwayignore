@@ -1,0 +1,11 @@
+.git
+.next
+node_modules
+.env
+.env.local
+.env.*.local
+.omc
+.tmp-test
+*.log
+tsconfig.tsbuildinfo
+design_handoff_command_center

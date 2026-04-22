@@ -43,3 +43,21 @@ a {
   color: inherit;
   text-decoration: none;
 }
+
+@keyframes cc-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.6; }
+  50% { transform: scale(2.2); opacity: 0; }
+}
+
+@keyframes cc-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.cc-pulse {
+  animation: cc-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.cc-blink {
+  animation: cc-blink 1s step-end infinite;
+}

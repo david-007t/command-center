@@ -22,28 +22,38 @@ export type RuntimeNotification = {
   eventType: string | null
   reason: RuntimeMutationEvent["reason"] | null
   chatThreadId: string | null
+  status: string | null
+  currentStage: string | null
+}
+
+const actionableStatuses = new Set(["completed", "failed", "blocked", "timed_out", "cancelled", "awaiting_ceo", "blocked_on_config"])
+
+export function isActionableRuntimeNotification(notification: Pick<RuntimeNotification, "eventType" | "reason" | "status">) {
+  if (notification.status && actionableStatuses.has(notification.status)) {
+    return true
+  }
+
+  if (notification.eventType === "run_launched" || notification.eventType === "run_stage_changed" || notification.eventType === "message_created") {
+    return false
+  }
+
+  return notification.reason === "decision"
 }
 
 export function shouldSuppressRuntimeNotification(
   currentPath: string,
-  notification: Pick<RuntimeNotification, "projectName" | "eventType" | "reason">,
+  notification: Pick<RuntimeNotification, "projectName" | "eventType" | "reason" | "status">,
 ) {
-  const match = currentPath.match(/^\/projects\/([^/]+)\/chat(?:\/|$)/)
-  if (!match) return false
-
-  const activeProject = decodeURIComponent(match[1] ?? "")
-  if (!activeProject) return false
-
-  // Project chat is already the live activity surface, so suppress all global toasts there.
-  if (!notification.projectName) {
+  if (!isActionableRuntimeNotification(notification)) {
     return true
   }
 
-  if (activeProject.toLowerCase() !== notification.projectName.toLowerCase()) {
-    return false
+  if (currentPath.match(/^\/projects\/[^/]+(?:\/|$)/)) {
+    // Project pages already show assignment progress and the run log inline.
+    return true
   }
 
-  return true
+  return false
 }
 
 function formatRuntimeNotice(event: RuntimeMutationEvent) {
@@ -65,6 +75,8 @@ export function buildRuntimeNotification(event: RuntimeMutationEvent): RuntimeNo
     eventType: event.eventType ?? null,
     reason: event.reason ?? null,
     chatThreadId: event.chatThreadId ?? null,
+    status: event.status ?? null,
+    currentStage: event.currentStage ?? null,
   }
 }
 

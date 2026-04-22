@@ -3,6 +3,8 @@ import assert from "node:assert/strict"
 
 import {
   assertEvidenceBeforeDone,
+  isStaleActiveRun,
+  isStaleQueuedRun,
   mapSupabaseRunToRuntimeJob,
   supabaseArtifactPath,
   type SupabaseArtifactRow,
@@ -62,6 +64,95 @@ test("mapSupabaseRunToRuntimeJob preserves the existing UI shape without local f
   assert.equal(mapped.logPath, supabaseArtifactPath("run-123", "execution_log"))
   assert.equal(mapped.workingDirectory, "inngest://leadqual/run-123")
   assert.equal(mapped.summary, "Executing")
+})
+
+test("mapSupabaseRunToRuntimeJob uses heartbeat time as the live update time for running rows", () => {
+  const mapped = mapSupabaseRunToRuntimeJob({
+    ...baseRun,
+    metadata: {
+      ...baseRun.metadata,
+      stageUpdatedAt: "2026-04-16T00:01:00.000Z",
+      lastHeartbeatAt: "2026-04-16T00:04:30.000Z",
+    },
+  })
+
+  assert.equal(mapped.stageUpdatedAt, "2026-04-16T00:04:30.000Z")
+})
+
+test("isStaleQueuedRun detects queued runs that Inngest never started", () => {
+  assert.equal(
+    isStaleQueuedRun(
+      {
+        status: "queued",
+        started_at: null,
+        created_at: "2026-04-16T00:00:00.000Z",
+      },
+      new Date("2026-04-16T00:11:00.000Z"),
+    ),
+    true,
+  )
+
+  assert.equal(
+    isStaleQueuedRun(
+      {
+        status: "queued",
+        started_at: "2026-04-16T00:01:00.000Z",
+        created_at: "2026-04-16T00:00:00.000Z",
+      },
+      new Date("2026-04-16T00:11:00.000Z"),
+    ),
+    false,
+  )
+})
+
+test("isStaleActiveRun detects running runs with a lost heartbeat", () => {
+  assert.equal(
+    isStaleActiveRun(
+      {
+        status: "running",
+        started_at: "2026-04-16T00:01:00.000Z",
+        metadata: {
+          stageUpdatedAt: "2026-04-16T00:01:00.000Z",
+          lastHeartbeatAt: "2026-04-16T00:02:00.000Z",
+        },
+      },
+      new Date("2026-04-16T00:08:01.000Z"),
+    ),
+    true,
+  )
+})
+
+test("isStaleActiveRun keeps running runs live when the heartbeat is fresh", () => {
+  assert.equal(
+    isStaleActiveRun(
+      {
+        status: "running",
+        started_at: "2026-04-16T00:01:00.000Z",
+        metadata: {
+          stageUpdatedAt: "2026-04-16T00:01:00.000Z",
+          lastHeartbeatAt: "2026-04-16T00:06:30.000Z",
+        },
+      },
+      new Date("2026-04-16T00:08:01.000Z"),
+    ),
+    false,
+  )
+})
+
+test("isStaleActiveRun falls back to stageUpdatedAt for older running rows", () => {
+  assert.equal(
+    isStaleActiveRun(
+      {
+        status: "running",
+        started_at: "2026-04-16T00:01:00.000Z",
+        metadata: {
+          stageUpdatedAt: "2026-04-16T00:01:00.000Z",
+        },
+      },
+      new Date("2026-04-16T00:08:01.000Z"),
+    ),
+    true,
+  )
 })
 
 test("assertEvidenceBeforeDone rejects done transitions without stored evidence", () => {

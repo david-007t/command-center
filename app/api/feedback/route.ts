@@ -2,6 +2,8 @@ import { NextResponse } from "next/server"
 import { getDeveloperPath } from "@/lib/orchestration"
 import { listFeedbackRecords } from "@/lib/feedback"
 
+export const dynamic = "force-dynamic"
+
 export async function GET(request: Request) {
   const developerPath = getDeveloperPath()
   const url = new URL(request.url)

@@ -3,6 +3,8 @@ import { randomUUID } from "crypto"
 import { insertRows, selectRows, updateRows, upsertRows } from "./supabase/rest"
 import {
   isInngestArtifactPath,
+  isStaleActiveRun,
+  isStaleQueuedRun,
   mapSupabaseRunToRuntimeJob,
   parseInngestArtifactPath,
   supabaseArtifactPath,
@@ -14,8 +16,10 @@ import {
 export {
   assertEvidenceBeforeDone,
   isInngestArtifactPath,
+  isStaleActiveRun,
   mapSupabaseRunToRuntimeJob,
   parseInngestArtifactPath,
+  isStaleQueuedRun,
   supabaseArtifactPath,
   type SupabaseArtifactRow,
   type SupabaseRunRow,
@@ -25,6 +29,7 @@ type ProjectRow = {
   id: string
   name: string
   repo_path: string
+  metadata?: Record<string, unknown> | null
 }
 
 type ThreadRow = {
@@ -254,6 +259,14 @@ export async function updateRunRecord(
   return updated ?? existing
 }
 
+export async function touchRunHeartbeat(runId: string, heartbeatAt = new Date().toISOString()) {
+  return updateRunRecord(runId, {
+    metadata: {
+      lastHeartbeatAt: heartbeatAt,
+    },
+  })
+}
+
 export async function findTrackedStep(runId: string, stepKey: string) {
   const [step] = await selectRows<RunStepRow>("run_steps", {
     select: "id,run_id,step_key,step_type,status,input,output,error,started_at,completed_at",
@@ -365,6 +378,153 @@ export async function listInngestRuns(projectName?: string) {
   )
 
   return filtered.map((run) => mapSupabaseRunToRuntimeJob(run, artifactsByRun.get(run.id) ?? []))
+}
+
+export async function expireStaleQueuedRuns(projectName?: string, now = new Date()) {
+  const runs = await selectRows<SupabaseRunRow>("runs", {
+    select: "id,project_id,thread_id,run_template,instruction,status,current_stage,summary,created_at,started_at,completed_at,metadata",
+    order: "created_at.desc",
+  })
+
+  const staleRuns = runs.filter((run) => {
+    const metadata = run.metadata ?? {}
+    if (metadata.engine !== ENGINE) return false
+    if (projectName && metadata.projectName !== projectName) return false
+    return isStaleQueuedRun(run, now)
+  })
+
+  await Promise.all(
+    staleRuns.map(async (run) => {
+      const metadata = run.metadata ?? {}
+      const projectNameForArtifact = typeof metadata.projectName === "string" ? metadata.projectName : null
+      const completedAt = now.toISOString()
+      await updateRunRecord(run.id, {
+        status: "timed_out",
+        current_stage: "blocked",
+        summary: "Worker launch timed out before Inngest picked it up. Retry the run.",
+        completed_at: completedAt,
+        metadata: {
+          stageUpdatedAt: completedAt,
+          dispatchTimedOutAt: completedAt,
+        },
+      })
+      if (projectNameForArtifact) {
+        await createRunArtifact({
+          projectName: projectNameForArtifact,
+          runId: run.id,
+          artifactType: "execution_log",
+          label: "Dispatch timeout",
+          content:
+            "The run stayed queued without a start timestamp until the dispatch timeout expired. Inngest did not pick up the event for execution, so no worker process or execution log was created. Retry the run after confirming the dev worker is connected.",
+          metadata: {
+            dispatchTimedOutAt: completedAt,
+          },
+        }).catch(() => null)
+      }
+    }),
+  )
+
+  return staleRuns.length
+}
+
+export async function expireStaleActiveRuns(projectName?: string, now = new Date()) {
+  const runs = await selectRows<SupabaseRunRow>("runs", {
+    select: "id,project_id,thread_id,run_template,instruction,status,current_stage,summary,created_at,started_at,completed_at,metadata",
+    order: "created_at.desc",
+  })
+
+  const staleRuns = runs.filter((run) => {
+    const metadata = run.metadata ?? {}
+    if (metadata.engine !== ENGINE) return false
+    if (projectName && metadata.projectName !== projectName) return false
+    return isStaleActiveRun(run, now)
+  })
+
+  await Promise.all(
+    staleRuns.map(async (run) => {
+      const metadata = run.metadata ?? {}
+      const projectNameForArtifact = typeof metadata.projectName === "string" ? metadata.projectName : null
+      const completedAt = now.toISOString()
+      const summary = "Worker heartbeat was lost. The run is no longer live; retry it if the work is still needed."
+      await updateRunRecord(run.id, {
+        status: "timed_out",
+        current_stage: "blocked",
+        summary,
+        completed_at: completedAt,
+        metadata: {
+          stageUpdatedAt: completedAt,
+          heartbeatLostAt: completedAt,
+          activeProcessPid: null,
+          exitCode: 124,
+        },
+      })
+      if (projectNameForArtifact) {
+        const [project] = await selectRows<ProjectRow>("projects", {
+          select: "id,name,repo_path,metadata",
+          filters: { id: run.project_id },
+          limit: 1,
+        }).catch(() => [])
+        const projectMetadata = project?.metadata && typeof project.metadata === "object" ? project.metadata : {}
+        const runtimeState = {
+          projectName: projectNameForArtifact,
+          jobId: run.id,
+          runTemplate: run.run_template,
+          status: "blocked",
+          summary,
+          governanceUpdated: false,
+          governanceTargets: Array.isArray(metadata.governanceTargets) ? metadata.governanceTargets : [],
+          updatedTargets: [],
+          missingTargets: [],
+          completedAt,
+          messagePreview: summary,
+          currentStage: "blocked",
+          stageUpdatedAt: completedAt,
+        }
+        await updateRows(
+          "projects",
+          {
+            current_run_id: run.id,
+            runtime_status: "blocked",
+            runtime_summary: summary,
+            current_stage: "blocked",
+            governance_updated: false,
+            last_run_completed_at: completedAt,
+            metadata: {
+              ...projectMetadata,
+              runtimeState,
+              phase1: {
+                ...((projectMetadata.phase1 as Record<string, unknown> | undefined) ?? {}),
+                portfolioProject: {
+                  ...((((projectMetadata.phase1 as Record<string, unknown> | undefined)?.portfolioProject as Record<string, unknown> | undefined) ??
+                    {}) as Record<string, unknown>),
+                  runtimeState: {
+                    status: "blocked",
+                    statusLabel: "Blocked",
+                    summary,
+                    currentStage: "blocked",
+                  },
+                },
+              },
+            },
+          },
+          { id: run.project_id },
+        ).catch(() => [])
+        await createRunArtifact({
+          projectName: projectNameForArtifact,
+          runId: run.id,
+          artifactType: "execution_log",
+          label: "Worker heartbeat lost",
+          content:
+            "The run was marked running, but Command Center stopped receiving heartbeat/activity updates. The worker process is not considered live anymore, so this run was closed as timed out instead of leaving a stale running card. Retry the run if the assignment is still needed.",
+          metadata: {
+            heartbeatLostAt: completedAt,
+          },
+        }).catch(() => null)
+      }
+    }),
+  )
+
+  return staleRuns.length
 }
 
 export async function readInngestManagedRun(runId: string) {

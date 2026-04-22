@@ -3,13 +3,25 @@ import path from "path"
 import { deriveInvestigationAutonomy } from "@/lib/command-center-guardrails"
 import { listFeedbackRecords } from "@/lib/feedback"
 import { COMMAND_CENTER_PROJECT, getPortfolioPath, readPortfolioProjectsWithCommandCenter, resolveProjectDir } from "@/lib/managed-projects"
-import { getActiveJobs, getDeveloperPath, readProjectRuntimeState, type CeoDecision } from "@/lib/orchestration"
+import {
+  getActiveJobs,
+  getDeveloperPath,
+  readCommentaryPreview,
+  readMessagePreview,
+  readProjectRuntimeState,
+  type CeoDecision,
+} from "@/lib/orchestration"
 import { ensureProjectContextPack } from "@/lib/project-context-pack"
 import { getProjectStatus } from "@/lib/project-status"
+import { deploymentLinksEqual, mergeProjectDeploymentLinks } from "@/lib/project-deployment-links"
+import { getOperationsLiveData } from "@/lib/operations-live-data"
+import { readProjectReadiness } from "@/lib/project-readiness"
 import { isSupabaseConfigured } from "@/lib/supabase/env"
-import { deleteRows, insertRows, selectRows, upsertRows } from "@/lib/supabase/rest"
+import { deleteRows, insertRows, selectRows, updateRows, upsertRows } from "@/lib/supabase/rest"
 import { syncSystemImprovements } from "@/lib/system-improvements"
 import { summarizeUsage } from "@/lib/usage-telemetry"
+import { getVercelDeploymentLinks } from "@/lib/vercel-deployments"
+import { mapSupabaseRunToRuntimeJob, type SupabaseRunRow } from "../inngest-run-store"
 import {
   buildPortfolioResponseFromStore,
   mergeThreadMessagesPreservingRunEvents,
@@ -118,6 +130,7 @@ async function seedProjectsFromFilesystem(developerPath: string) {
     portfolioProjects.map(async (project) => {
       const detailed = await getProjectStatus(project.name).catch(() => null)
       const contextPack = await ensureProjectContextPack(developerPath, project.name).catch(() => null)
+      const readiness = await readProjectReadiness(resolveProjectDir(developerPath, project.name), detailed).catch(() => null)
       const autonomy = detailed?.investigation
         ? deriveInvestigationAutonomy({
             canAutofix: detailed.investigation.canAutofix,
@@ -172,6 +185,7 @@ async function seedProjectsFromFilesystem(developerPath: string) {
               compactionRecommendedAction: contextPack.compactionRecommendedAction,
             }
           : null,
+        readiness,
         blocker: executiveizeBlocker(project.blocker),
         nextAction: executiveizeNextAction(project.nextAction),
       }
@@ -277,6 +291,7 @@ async function seedProjectsFromFilesystem(developerPath: string) {
       statusLabel: executiveStatusLabel(job.status),
       instruction: job.instruction,
       createdAt: job.createdAt,
+      stageUpdatedAt: job.stageUpdatedAt,
       summary: job.summary,
       currentStage: job.currentStage,
     })),
@@ -339,7 +354,25 @@ export async function readPortfolioFromStore(developerPath = getDeveloperPath())
     select: "id,name,display_name,metadata",
     order: "created_at.asc",
   })
-  return buildPortfolioResponseFromStore(rows)
+  const response = buildPortfolioResponseFromStore(rows)
+  const operations = await getOperationsLiveData(developerPath).catch(() => null)
+  const liveProjects = response.projects
+  const activeBuildSlotProject = liveProjects.reduce((best, current) => (current.progress > best.progress ? current : best), liveProjects[0] ?? null)
+  return {
+    ...response,
+    projects: liveProjects,
+    activeBuildSlot: activeBuildSlotProject
+      ? {
+          projectName: activeBuildSlotProject.name,
+          phase: activeBuildSlotProject.phase,
+          progress: activeBuildSlotProject.progress,
+          lastSession: activeBuildSlotProject.latestHandoff || "No session recorded.",
+          nextAction: activeBuildSlotProject.nextAction,
+          blockers: activeBuildSlotProject.blocker,
+        }
+      : response.activeBuildSlot,
+    activeRuns: operations?.activeRuns ?? response.activeRuns,
+  }
 }
 
 export async function readProjectStatusFromStore(projectName: string, developerPath = getDeveloperPath()) {
@@ -352,8 +385,71 @@ export async function readProjectStatusFromStore(projectName: string, developerP
 
   if (!row) return null
 
-  const fresh = await getProjectStatus(projectName).catch(() => null)
-  return fresh ?? projectRowToProjectStatus(row)
+  const liveStatus = await getProjectStatus(projectName).catch(() => null)
+  if (liveStatus) {
+    await updateRows(
+      "projects",
+      {
+        phase: liveStatus.phase,
+        progress: liveStatus.progress,
+        launch_target: liveStatus.launchTarget,
+        runtime_status: liveStatus.runtimeState?.status ?? null,
+        runtime_summary: liveStatus.runtimeState?.summary ?? null,
+        current_stage: liveStatus.runtimeState?.currentStage ?? null,
+        blocked_reason: liveStatus.operatingState?.blocker ?? liveStatus.blocker,
+        governance_updated: Boolean(liveStatus.runtimeState?.governanceUpdated),
+        last_run_completed_at: liveStatus.runtimeState?.completedAt ?? null,
+        last_event_at: liveStatus.freshness?.generatedAt ?? new Date().toISOString(),
+        metadata: {
+          ...row.metadata,
+          phase1: {
+            ...(row.metadata.phase1 ?? {}),
+            projectStatus: liveStatus,
+            portfolioProject: {
+              ...(row.metadata.phase1?.portfolioProject ?? {}),
+              name: liveStatus.name,
+              phase: liveStatus.phase,
+              progress: liveStatus.progress,
+              blocker: liveStatus.operatingState?.blocker ?? liveStatus.blocker,
+              nextAction: liveStatus.operatingState?.nextAction ?? liveStatus.nextAction,
+              launchTarget: liveStatus.launchTarget,
+              latestHandoff: liveStatus.latestHandoff.whatWorks || liveStatus.latestHandoff.whatIsBroken || "",
+              runtimeState: liveStatus.runtimeState
+                ? {
+                    status: liveStatus.runtimeState.status,
+                    statusLabel: liveStatus.runtimeState.statusLabel,
+                    summary: liveStatus.runtimeState.summary,
+                    currentStage: liveStatus.runtimeState.currentStage,
+                    trust: {
+                      level: liveStatus.runtimeState.trust.level,
+                      headline: liveStatus.runtimeState.trust.headline,
+                      checks: liveStatus.runtimeState.trust.checks,
+                    },
+                  }
+                : null,
+              readiness: row.metadata.phase1?.portfolioProject?.readiness ?? null,
+              investigation: liveStatus.investigation
+                ? {
+                    title: liveStatus.investigation.title,
+                    summary: liveStatus.investigation.summary,
+                    likelyCause: liveStatus.investigation.likelyCause,
+                    nextStep: liveStatus.investigation.nextStep,
+                    canAutofix: liveStatus.investigation.canAutofix,
+                    status: liveStatus.investigation.status,
+                    autonomyMode: liveStatus.investigation.autonomyMode,
+                    autonomyRationale: liveStatus.investigation.autonomyRationale,
+                  }
+                : null,
+            },
+          },
+        },
+      },
+      { id: row.id },
+    ).catch(() => null)
+    return liveStatus
+  }
+
+  return refreshStoredProjectRuntime(projectRowToProjectStatus(row), row, developerPath)
 }
 
 export async function readProjectPageDataFromStore(projectName: string, developerPath = getDeveloperPath()) {
@@ -367,12 +463,90 @@ export async function readProjectPageDataFromStore(projectName: string, develope
   if (!row) return null
 
   const stored = projectRowToPageData(row)
-  const freshProjectStatus = await getProjectStatus(projectName).catch(() => null)
+  const liveProjectStatus = await getProjectStatus(projectName).catch(() => null)
 
   return {
     ...stored,
-    projectStatus: freshProjectStatus ?? stored.projectStatus,
+    projectStatus: liveProjectStatus ?? await refreshStoredProjectRuntime(stored.projectStatus, row, developerPath),
   }
+}
+
+async function refreshStoredProjectRuntime<T extends ReturnType<typeof projectRowToProjectStatus>>(
+  projectStatus: T,
+  row?: Phase1ProjectRow,
+  developerPath = getDeveloperPath(),
+): Promise<T> {
+  if (!projectStatus?.name) return projectStatus
+
+  const jobs = await listFastProjectJobs(projectStatus.name).catch(() => [])
+  const enrichedJobs = await Promise.all(
+    jobs.slice(0, 8).map(async (job) => {
+      const shouldReadPreview = job.status === "running" || job.status === "queued" || job === jobs[0]
+      const messagePreview = shouldReadPreview ? await readMessagePreview(job.messagePath).catch(() => "") : ""
+      return {
+        ...job,
+        statusLabel: executiveStatusLabel(job.status),
+        messagePreview,
+        rawMessagePreview: messagePreview,
+        commentaryPreview: shouldReadPreview ? await readCommentaryPreview(job.commentaryPath).catch(() => "") : "",
+        executiveMessage: messagePreview || job.summary,
+        logPreview: "",
+      }
+    }),
+  )
+  const resolvedDeploymentLinks = await getVercelDeploymentLinks({
+    projectName: projectStatus.name,
+    projectDir: resolveProjectDir(developerPath, projectStatus.name),
+  }).catch(() => ({ production: null, stage: null }))
+  const deploymentLinks = mergeProjectDeploymentLinks({
+    existing: projectStatus.deploymentLinks,
+    resolved: resolvedDeploymentLinks,
+    workerText: [
+      ...enrichedJobs.flatMap((job) => [job.rawMessagePreview, job.messagePreview, job.executiveMessage, job.summary]),
+      projectStatus.runtimeState?.messagePreview,
+      projectStatus.runtimeState?.summary,
+      ...(projectStatus.jobs ?? []).flatMap((job) => [job.rawMessagePreview, job.messagePreview, job.executiveMessage, job.summary]),
+    ],
+    investigationUrl: projectStatus.investigation?.deploymentDetails?.url,
+  })
+
+  if (row && !deploymentLinksEqual(projectStatus.deploymentLinks ?? { production: null, stage: null }, deploymentLinks)) {
+    await updateRows(
+      "projects",
+      {
+        metadata: {
+          ...row.metadata,
+          phase1: {
+            ...(row.metadata.phase1 ?? {}),
+            projectStatus: {
+              ...projectStatus,
+              deploymentLinks,
+            },
+          },
+        },
+      },
+      { id: row.id },
+    ).catch(() => null)
+  }
+
+  return {
+    ...projectStatus,
+    deploymentLinks,
+    jobs: enrichedJobs.length ? enrichedJobs : projectStatus.jobs,
+  } as T
+}
+
+async function listFastProjectJobs(projectName: string) {
+  const rows = await selectRows<SupabaseRunRow>("runs", {
+    select: "id,project_id,thread_id,run_template,instruction,status,current_stage,summary,created_at,started_at,completed_at,metadata",
+    order: "created_at.desc",
+    limit: 20,
+  })
+
+  return rows
+    .filter((run) => run.metadata?.engine === "inngest" && run.metadata?.projectName === projectName)
+    .slice(0, 8)
+    .map((run) => mapSupabaseRunToRuntimeJob(run, []))
 }
 
 async function getProjectRow(projectName: string, developerPath = getDeveloperPath()) {

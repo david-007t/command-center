@@ -1,8 +1,2 @@
-[phases.install]
-cmds = ["npm ci"]
-
-[phases.build]
-cmds = ["npm run build"]
-
-[start]
-cmd = "node scripts/start-railway.js"
+[phases.setup]
+nixPkgs = ["nodejs_20", "npm-10_x"]

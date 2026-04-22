@@ -2,9 +2,12 @@
   "name": "command-center",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=20 <23"
+  },
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "node scripts/guarded-next-build.js",
     "start": "next start",
     "lint": "next lint"
   },

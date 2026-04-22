@@ -6,6 +6,8 @@ import {
   createContinueProjectRun,
   createOrchestratorRun,
   createProjectTaskRun,
+  expireStaleActiveRuns,
+  expireStaleQueuedRuns,
   isInngestArtifactPath,
   listInngestRuns,
   mapSupabaseRunToRuntimeJob,
@@ -13,6 +15,7 @@ import {
   readInngestManagedRun,
   updateRunRecord,
 } from "@/lib/inngest-run-store"
+import { CloudProjectWorkspaceError, ensureProjectWorkspace } from "@/lib/cloud-project-workspace"
 import { COMMAND_CENTER_PROJECT, resolveProjectDir } from "@/lib/managed-projects"
 import { recordProjectRuntimeUpdated, recordRuntimeEvent } from "@/lib/runtime-events"
 import { projectRowToRuntimeState, runtimeStateToProjectUpdate, type RuntimeStateProjectRow } from "@/lib/runtime-store/runtime-state"
@@ -227,6 +230,8 @@ export async function readSprintPrioritySnapshot(developerPath: string, projectN
 export async function listJobs(developerPath: string, projectName?: string) {
   void developerPath
   assertManagedRuntimeConfigured()
+  await expireStaleQueuedRuns(projectName).catch(() => 0)
+  await expireStaleActiveRuns(projectName).catch(() => 0)
   return (await listInngestRuns(projectName).catch(() => [])).sort((left, right) => right.createdAt.localeCompare(left.createdAt))
 }
 
@@ -469,14 +474,22 @@ export async function launchJob(params: {
     throw new Error("A worker is already active for this scope. Wait for it to finish before starting another one.")
   }
 
-  const workingDirectory =
-    type === "project_task"
-      ? resolveProjectDir(developerPath, projectName as string)
-      : type === "system_task"
-        ? resolveProjectDir(developerPath, COMMAND_CENTER_PROJECT)
-        : path.join(developerPath, "_system", "orchestrator")
+  let workingDirectory: string
+  try {
+    workingDirectory =
+      type === "project_task"
+        ? await ensureProjectWorkspace({ developerPath, projectName: projectName as string })
+        : type === "system_task"
+          ? resolveProjectDir(developerPath, COMMAND_CENTER_PROJECT)
+          : path.join(developerPath, "_system", "orchestrator")
 
-  await fs.access(workingDirectory)
+    await fs.access(workingDirectory)
+  } catch (error) {
+    if (error instanceof CloudProjectWorkspaceError) {
+      throw new Error(`${error.message} ${error.nextStep}`)
+    }
+    throw error
+  }
   assertManagedRuntimeConfigured()
 
   if (type === "project_task" && runTemplate === "continue_project" && projectName) {

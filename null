@@ -1,0 +1,16 @@
+**Outcome**
+Command Center now gives a deterministic feedback confirmation instead of leaving that wording to model judgment. When the CEO gives system feedback, the chat response now explicitly says the feedback was captured, logged as tracked system input, and whether a worker was auto-launched or the item is queued for review. This was implemented with a small acknowledgment helper in [lib/feedback-acknowledgment.ts](/Users/ohsay22/Developer/command-center/lib/feedback-acknowledgment.ts:1) and wired into the feedback capture path in [app/api/chat/route.ts](/Users/ohsay22/Developer/command-center/app/api/chat/route.ts:421), including a direct return path for pure feedback submissions so the confirmation is not diluted by a second model pass.
+
+**Verification**
+I added targeted checks in [lib/feedback-acknowledgment.test.ts](/Users/ohsay22/Developer/command-center/lib/feedback-acknowledgment.test.ts:1) and ran:
+`npx tsc --outDir .tmp-test --module commonjs --target ES2020 --moduleResolution node --esModuleInterop true lib/feedback.ts lib/feedback-acknowledgment.ts lib/feedback-acknowledgment.test.ts && node --test .tmp-test/feedback-acknowledgment.test.js`
+Result: 2 tests passed, covering both “logged only” and “auto-launch started” confirmation copy.
+I also ran:
+`npx tsc --noEmit`
+Result: passed.
+
+**Governance updates**
+No governance file updates were needed. This was a narrow operating-system behavior fix inside `command-center`.
+
+**Next step**
+The next CEO feedback submitted through chat should now return explicit confirmation immediately. If you want, the next narrow improvement would be showing the same acknowledgment state more prominently in the dashboard’s “Recent feedback” panel.

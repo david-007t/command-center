@@ -16,6 +16,8 @@ import {
   type JobType,
 } from "@/lib/orchestration"
 
+export const dynamic = "force-dynamic"
+
 async function normalizeJobPayload(job: Awaited<ReturnType<typeof listJobs>>[number], messagePreview: string) {
   return {
     ...job,

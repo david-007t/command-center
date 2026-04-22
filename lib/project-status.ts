@@ -26,7 +26,11 @@ import {
 } from "@/lib/executive"
 import { readInvestigationRecord, type InvestigationRecord } from "@/lib/project-investigation"
 import { getPortfolioPath, readPortfolioProjectsWithCommandCenter, resolveProjectDir } from "@/lib/managed-projects"
+import { mergeProjectDeploymentLinks } from "@/lib/project-deployment-links"
+import { deriveRuntimeStateFromLatestJob } from "@/lib/project-live-state"
 import { summarizeTrustChecks, type TrustCheck, type TrustSummary } from "@/lib/project-trust"
+import { getVercelDeploymentLinks, type VercelDeploymentLink } from "@/lib/vercel-deployments"
+import { deriveProjectOperatingState, type ProjectOperatingState } from "@/lib/project-operating-state"
 
 const execFileAsync = promisify(execFile)
 
@@ -42,6 +46,7 @@ export type Job = {
   completedAt: string | null
   summary: string
   messagePreview: string
+  rawMessagePreview: string
   commentaryPreview: string
   executiveMessage: string
   logPreview: string
@@ -144,6 +149,11 @@ export type ProjectStatus = {
     label: string
     reason: string
   }
+  operatingState: ProjectOperatingState
+  deploymentLinks: {
+    production: VercelDeploymentLink | null
+    stage: VercelDeploymentLink | null
+  }
   investigation: InvestigationSummary | null
   runtimeState: {
     projectName: string
@@ -167,6 +177,18 @@ export type ProjectStatus = {
     stageUpdatedAt: string | null
     trust: TrustSummary
   } | null
+  freshness: {
+    generatedAt: string
+    sources: {
+      portfolio: { label: string; updatedAt: string | null }
+      tasks: { label: string; updatedAt: string | null }
+      handoff: { label: string; updatedAt: string | null }
+      errors: { label: string; updatedAt: string | null }
+      runtime: { label: string; updatedAt: string | null; jobId: string | null }
+      jobs: { label: string; updatedAt: string | null; jobId: string | null }
+      deploymentLinks: { label: string; updatedAt: string | null }
+    }
+  }
   jobs: Job[]
 }
 
@@ -209,6 +231,10 @@ function listItems(content: string) {
 
 function firstParagraph(content: string) {
   return content.split("\n").map((line) => line.trim()).find(Boolean) ?? ""
+}
+
+async function fileMtime(filePath: string) {
+  return fs.stat(filePath).then((stats) => stats.mtime.toISOString()).catch(() => null)
 }
 
 async function parsePortfolioRow(developerPath: string, markdown: string, projectName: string) {
@@ -431,65 +457,118 @@ export async function getProjectStatus(projectName: string): Promise<ProjectStat
   const developerPath = getDeveloperPath()
   const projectDir = resolveProjectDir(developerPath, projectName)
   await fs.access(projectDir)
+  const portfolioPath = getPortfolioPath(developerPath)
+  const tasksPath = path.join(projectDir, "TASKS.md")
+  const handoffPath = path.join(projectDir, "HANDOFF.md")
+  const errorsPath = path.join(projectDir, "ERRORS.md")
 
-  const [portfolio, tasks, handoff, errors] = await Promise.all([
-    fs.readFile(getPortfolioPath(developerPath), "utf8").catch(() => ""),
-    fs.readFile(path.join(projectDir, "TASKS.md"), "utf8").catch(() => ""),
-    fs.readFile(path.join(projectDir, "HANDOFF.md"), "utf8").catch(() => ""),
-    fs.readFile(path.join(projectDir, "ERRORS.md"), "utf8").catch(() => ""),
+  const [portfolio, tasks, handoff, errors, qaChecklist, securityChecklist] = await Promise.all([
+    fs.readFile(portfolioPath, "utf8").catch(() => ""),
+    fs.readFile(tasksPath, "utf8").catch(() => ""),
+    fs.readFile(handoffPath, "utf8").catch(() => ""),
+    fs.readFile(errorsPath, "utf8").catch(() => ""),
+    fs.readFile(path.join(projectDir, "QA_CHECKLIST.md"), "utf8").catch(() => ""),
+    fs.readFile(path.join(projectDir, "SECURITY_CHECKLIST.md"), "utf8").catch(() => ""),
   ])
 
   const jobs = await listJobs(developerPath, projectName)
   const runtimeState = await readProjectRuntimeState(developerPath, projectName)
   const investigationRecord = await readInvestigationRecord(developerPath, projectName)
-  const ceoDecision = runtimeState ? executiveDecisionFromRuntime(projectName, runtimeState) : null
+  const resolvedDeploymentLinks = await getVercelDeploymentLinks({ projectName, projectDir }).catch(() => ({ production: null, stage: null }))
   const enrichedJobs = await Promise.all(
-    jobs.slice(0, 8).map(async (job) => ({
-      ...job,
-      statusLabel: executiveStatusLabel(job.status),
-      messagePreview: executiveizeText(await readMessagePreview(job.messagePath)),
-      commentaryPreview: executiveizeText(await readCommentaryPreview(job.commentaryPath)),
-      executiveMessage: executiveizeLatestOutcome(await readMessagePreview(job.messagePath) || job.summary),
-      logPreview: executiveizeText(await readLogPreview(job.logPath)),
-    })),
+    jobs.slice(0, 8).map(async (job) => {
+      const rawMessagePreview = await readMessagePreview(job.messagePath)
+      return {
+        ...job,
+        statusLabel: executiveStatusLabel(job.status),
+        messagePreview: executiveizeText(rawMessagePreview),
+        rawMessagePreview,
+        commentaryPreview: executiveizeText(await readCommentaryPreview(job.commentaryPath)),
+        executiveMessage: executiveizeLatestOutcome(rawMessagePreview || job.summary),
+        logPreview: executiveizeText(await readLogPreview(job.logPath)),
+      }
+    }),
   )
+  const latestJob = enrichedJobs[0] ?? null
+  const liveRuntimeState = deriveRuntimeStateFromLatestJob({
+    projectName,
+    existing: runtimeState,
+    latestJob,
+    messagePreview: latestJob?.rawMessagePreview || latestJob?.messagePreview || latestJob?.summary,
+  })
+  const ceoDecision = liveRuntimeState ? executiveDecisionFromRuntime(projectName, liveRuntimeState) : null
 
   const portfolioState = await parsePortfolioRow(developerPath, portfolio, projectName)
   const taskState = parseTasks(tasks)
   const handoffState = parseLatestHandoffSummary(handoff)
   const errorState = parseErrors(errors)
-  const presentedRuntimeState = runtimeState
+  const latestActiveRun = enrichedJobs.find((job) => job.status === "running" || job.status === "queued")
+  const latestFinishedRun = enrichedJobs.find((job) => job.status !== "running" && job.status !== "queued")
+  const presentedRuntimeState = liveRuntimeState
     ? {
-        ...runtimeState,
-        statusLabel: executiveStatusLabel(runtimeState.status),
-        summary: executiveRuntimeSummary(runtimeState),
-        messagePreview: executiveizeRuntimeMessage(runtimeState),
+        ...liveRuntimeState,
+        statusLabel: executiveStatusLabel(liveRuntimeState.status),
+        summary: executiveRuntimeSummary(liveRuntimeState),
+        messagePreview: executiveizeRuntimeMessage(liveRuntimeState),
         trust: await deriveRuntimeTrust(projectDir, {
-          ...runtimeState,
-          statusLabel: executiveStatusLabel(runtimeState.status),
-          summary: executiveRuntimeSummary(runtimeState),
-          messagePreview: executiveizeRuntimeMessage(runtimeState),
-          rawMessagePreview: runtimeState.messagePreview,
+          ...liveRuntimeState,
+          statusLabel: executiveStatusLabel(liveRuntimeState.status),
+          summary: executiveRuntimeSummary(liveRuntimeState),
+          messagePreview: executiveizeRuntimeMessage(liveRuntimeState),
+          rawMessagePreview: liveRuntimeState.messagePreview,
         }, investigationRecord),
       }
     : null
+  const operatingState = deriveProjectOperatingState({
+    phase: portfolioState.phase,
+    runtimeStatus: presentedRuntimeState?.status,
+    qaChecklist,
+    securityChecklist,
+    latestActiveRunStatus: latestActiveRun?.status,
+    latestFinishedRunStatus: latestFinishedRun?.status,
+    latestFinishedRunSummary: latestFinishedRun?.summary,
+  })
   const recommendedAction =
-    presentedRuntimeState?.trust.level === "unverified"
+    operatingState.status === "pending_ceo_test"
+      ? {
+          template: "prep_qa" as RunTemplate,
+          label: "Run CEO test",
+          reason: "The worker finished the build task; the project is now waiting on your product-flow test evidence.",
+        }
+      : presentedRuntimeState?.trust.level === "unverified"
       ? {
           template: "investigate_issue" as RunTemplate,
           label: "Investigate issue",
           reason: "Some important claims are still unverified, so the safest next move is to investigate the missing proof before continuing blindly.",
         }
-      : summarizeRecommendedAction(runtimeState)
+      : summarizeRecommendedAction(liveRuntimeState)
   const investigation = presentedRuntimeState
     ? deriveInvestigation(projectName, presentedRuntimeState.trust, {
-        ...runtimeState!,
+        ...liveRuntimeState!,
         statusLabel: presentedRuntimeState.statusLabel,
         summary: presentedRuntimeState.summary,
         messagePreview: presentedRuntimeState.messagePreview,
-        rawMessagePreview: runtimeState!.messagePreview,
+        rawMessagePreview: liveRuntimeState!.messagePreview,
       }, investigationRecord)
     : null
+  const deploymentLinks = mergeProjectDeploymentLinks({
+    resolved: resolvedDeploymentLinks,
+    workerText: [
+      ...enrichedJobs.flatMap((job) => [job.rawMessagePreview, job.messagePreview, job.executiveMessage, job.summary]),
+      presentedRuntimeState?.messagePreview,
+      presentedRuntimeState?.summary,
+    ],
+    investigationUrl: investigation?.deploymentDetails?.url,
+  })
+  const [portfolioUpdatedAt, tasksUpdatedAt, handoffUpdatedAt, errorsUpdatedAt] = await Promise.all([
+    fileMtime(portfolioPath),
+    fileMtime(tasksPath),
+    fileMtime(handoffPath),
+    fileMtime(errorsPath),
+  ])
+  const newestJobUpdatedAt = latestJob?.completedAt ?? latestJob?.stageUpdatedAt ?? latestJob?.startedAt ?? latestJob?.createdAt ?? null
+  const deploymentUpdatedAt =
+    deploymentLinks.production?.createdAt ?? deploymentLinks.stage?.createdAt ?? resolvedDeploymentLinks.production?.createdAt ?? resolvedDeploymentLinks.stage?.createdAt ?? null
 
   return {
     name: projectName,
@@ -503,9 +582,27 @@ export async function getProjectStatus(projectName: string): Promise<ProjectStat
     latestHandoff: handoffState,
     activeError: errorState,
     recommendedAction,
+    operatingState,
+    deploymentLinks,
     investigation,
     ceoDecision,
     jobs: enrichedJobs,
     runtimeState: presentedRuntimeState,
+    freshness: {
+      generatedAt: new Date().toISOString(),
+      sources: {
+        portfolio: { label: "PORTFOLIO.md", updatedAt: portfolioUpdatedAt },
+        tasks: { label: "TASKS.md", updatedAt: tasksUpdatedAt },
+        handoff: { label: "HANDOFF.md", updatedAt: handoffUpdatedAt },
+        errors: { label: "ERRORS.md", updatedAt: errorsUpdatedAt },
+        runtime: {
+          label: liveRuntimeState?.jobId === latestJob?.id ? "latest worker run" : "project runtime record",
+          updatedAt: liveRuntimeState?.stageUpdatedAt ?? liveRuntimeState?.completedAt ?? null,
+          jobId: liveRuntimeState?.jobId ?? null,
+        },
+        jobs: { label: "runs table", updatedAt: newestJobUpdatedAt, jobId: latestJob?.id ?? null },
+        deploymentLinks: { label: "Vercel + worker output", updatedAt: deploymentUpdatedAt },
+      },
+    },
   }
 }

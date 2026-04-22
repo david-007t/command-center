@@ -333,7 +333,7 @@ export function executiveDecisionFromRuntime(projectName: string, runtimeState: 
 
 export function executiveRuntimeSummary(runtimeState: ProjectRuntimeState) {
   if (runtimeState.status === "awaiting_ceo") {
-    return "The system completed its review and is waiting on a decision from you."
+    return executiveizeText(runtimeState.summary, "The latest run completed and is waiting on your review.")
   }
 
   if (runtimeState.status === "blocked") {
@@ -359,7 +359,7 @@ export function executiveizeRuntimeMessage(runtimeState: ProjectRuntimeState) {
   }
 
   if (runtimeState.status === "awaiting_ceo") {
-    return "The system found a decision point and paused further build work until you choose the primary direction."
+    return cleaned
   }
 
   if (runtimeState.status === "cancelled") {

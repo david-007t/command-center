@@ -4,6 +4,8 @@ import type { ChatThreadMessage } from "@/lib/chat-thread-messages"
 import { getDeveloperPath } from "@/lib/orchestration"
 import { recordThreadMessageCreated } from "@/lib/runtime-events"
 
+export const dynamic = "force-dynamic"
+
 export async function GET(request: Request) {
   const developerPath = getDeveloperPath()
   const url = new URL(request.url)

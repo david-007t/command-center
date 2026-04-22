@@ -60,6 +60,23 @@ test("buildChatRunEvent produces a final verified outcome message for completed 
   assert.match(event.body, /stage deployment is now verified/i)
 })
 
+test("buildChatRunEvent uses the stop summary before stale commentary for cancelled work", () => {
+  const event = buildChatRunEvent(
+    makeJob({
+      status: "cancelled",
+      currentStage: "blocked",
+      completedAt: "2026-04-15T18:05:00.000Z",
+      summary: "Worker was cancelled by the operator.",
+    }),
+    "Using Grep.\nReading files from before the worker died.",
+    "",
+  )
+
+  assert.equal(event.kind, "final")
+  assert.match(event.body, /Worker was cancelled by the operator/i)
+  assert.doesNotMatch(event.body, /Using Grep/i)
+})
+
 test("buildChatRunEvent normalizes operator commentary into trust-oriented sections", () => {
   const event = buildChatRunEvent(
     makeJob({ currentStage: "executing" }),

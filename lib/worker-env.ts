@@ -1,6 +1,6 @@
 import { promises as fs } from "fs"
 import path from "path"
-import { resolveWorkerSecrets } from "@/lib/runtime-secrets"
+import { resolveWorkerSecrets } from "./runtime-secrets"
 
 function parseEnvFile(content: string) {
   const parsed: Record<string, string> = {}

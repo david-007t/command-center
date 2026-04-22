@@ -35,6 +35,7 @@ async function transitionRunStage(params: {
     started_at: params.status === "running" ? now : undefined,
     metadata: {
       stageUpdatedAt: now,
+      lastHeartbeatAt: now,
     },
   })
 

@@ -2,8 +2,6 @@ import { notFound } from "next/navigation"
 import { ProjectOperator } from "@/components/project-operator"
 import { loadProjectPageData } from "@/lib/project-page-data"
 
-export const dynamic = "force-dynamic"
-
 export default async function ProjectLogPage({
   params,
 }: {

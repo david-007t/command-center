@@ -1,5 +1,5 @@
 # SYSTEM_IMPROVEMENTS.md
-# Last updated: 2026-04-19
+# Last updated: 2026-04-22
 
 ## Current improvement focus
 
@@ -21,7 +21,7 @@ Command Center is currently tracking self heal work: Approval system critically 
 - 2026-04-16 — [Logged] Prove the operating-system feedback path with a fresh, narrow self-heal run against command-center. Desired outcome: Auto-launch the smallest safe command-center worker automatically and keep the tracked outcome visible in SYSTEM_IMPROVEMENTS.md so the end-to-end self-heal path is verified.
 - 2026-04-16 — [Logged] Worker completion notifications are not working - workers finish without telling the CEO. Desired outcome: System should notify the CEO immediately when workers complete, providing clear completion status and outcome summary.
 - 2026-04-16 — [Needs decision] Worker completion notifications are not working - workers finish without telling the CEO. Desired outcome: System should notify the CEO immediately when workers complete, providing clear completion status and outcome summary. Outcome: Codex worker is blocked by the current Codex usage limit. Restore available credits or wait for the limit reset before retrying this fix.
-- 2026-04-16 — [Needs decision] Vercel API token provided to resolve anelo deployment investigation blocker. Desired outcome: Configure the provided Vercel API token ([REDACTED — rotate this token]) in the system environment so investigation workers can inspect live Vercel deployment state and logs. Outcome: Codex worker is blocked by the current Codex usage limit. Restore available credits or wait for the limit reset before retrying this fix.
+- 2026-04-16 — [Needs decision] Vercel API token provided to resolve anelo deployment investigation blocker. Desired outcome: Configure the provided Vercel API token ([REDACTED_VERCEL_TOKEN]) in the system environment so investigation workers can inspect live Vercel deployment state and logs. Outcome: Codex worker is blocked by the current Codex usage limit. Restore available credits or wait for the limit reset before retrying this fix.
 
 ## Recently resolved
 

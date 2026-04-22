@@ -1,6 +1,11 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { buildRuntimeNotification, mergeRuntimeNotifications, shouldSuppressRuntimeNotification } from "./runtime-notification-center.ts"
+import {
+  buildRuntimeNotification,
+  isActionableRuntimeNotification,
+  mergeRuntimeNotifications,
+  shouldSuppressRuntimeNotification,
+} from "./runtime-notification-center.ts"
 import type { RuntimeMutationEvent } from "./runtime-event-types.ts"
 
 function makeEvent(overrides: Partial<RuntimeMutationEvent> = {}): RuntimeMutationEvent {
@@ -65,8 +70,29 @@ test("mergeRuntimeNotifications keeps only the newest notifications", () => {
   assert.equal(queue.at(-1)?.jobId, "job-2")
 })
 
-test("shouldSuppressRuntimeNotification hides same-project updates while viewing that project's chat", () => {
-  const notification = buildRuntimeNotification(makeEvent({ projectName: "leadqual" }))
+test("isActionableRuntimeNotification only allows final or attention-needed outcomes", () => {
+  assert.equal(isActionableRuntimeNotification(buildRuntimeNotification(makeEvent())), false)
+  assert.equal(isActionableRuntimeNotification(buildRuntimeNotification(makeEvent({ eventType: "run_launched", status: "queued" }))), false)
+  assert.equal(
+    isActionableRuntimeNotification(buildRuntimeNotification(makeEvent({ eventType: "message_created", status: null }))),
+    false,
+  )
+  assert.equal(
+    isActionableRuntimeNotification(
+      buildRuntimeNotification(makeEvent({ eventType: "run_stage_changed", status: "completed", currentStage: "done" })),
+    ),
+    true,
+  )
+  assert.equal(
+    isActionableRuntimeNotification(
+      buildRuntimeNotification(makeEvent({ eventType: "run_stage_changed", status: "blocked", currentStage: "blocked" })),
+    ),
+    true,
+  )
+})
+
+test("shouldSuppressRuntimeNotification hides routine updates and all toasts on project pages", () => {
+  const notification = buildRuntimeNotification(makeEvent({ projectName: "leadqual", status: "completed", currentStage: "done" }))
   const chatRefreshNotification = buildRuntimeNotification(
     makeEvent({
       projectName: "leadqual",
@@ -79,6 +105,9 @@ test("shouldSuppressRuntimeNotification hides same-project updates while viewing
   assert.equal(shouldSuppressRuntimeNotification("/projects/leadqual/chat", notification), true)
   assert.equal(shouldSuppressRuntimeNotification("/projects/LeadQual/chat", notification), true)
   assert.equal(shouldSuppressRuntimeNotification("/projects/leadqual/chat", chatRefreshNotification), true)
+  assert.equal(shouldSuppressRuntimeNotification("/projects/leadqual/work", notification), true)
+  assert.equal(shouldSuppressRuntimeNotification("/projects/leadqual/log", notification), true)
+  assert.equal(shouldSuppressRuntimeNotification("/projects/leadqual/overview", notification), true)
   assert.equal(
     shouldSuppressRuntimeNotification(
       "/projects/leadqual/chat",
@@ -93,6 +122,7 @@ test("shouldSuppressRuntimeNotification hides same-project updates while viewing
     ),
     true,
   )
-  assert.equal(shouldSuppressRuntimeNotification("/projects/rbc/chat", notification), false)
-  assert.equal(shouldSuppressRuntimeNotification("/projects/leadqual/work", notification), false)
+  assert.equal(shouldSuppressRuntimeNotification("/projects/rbc/chat", notification), true)
+  assert.equal(shouldSuppressRuntimeNotification("/", notification), false)
+  assert.equal(shouldSuppressRuntimeNotification("/", buildRuntimeNotification(makeEvent())), true)
 })

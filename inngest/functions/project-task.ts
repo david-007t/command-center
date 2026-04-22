@@ -1,7 +1,5 @@
 import { promises as fs } from "fs"
-import os from "os"
 import path from "path"
-import { spawn } from "child_process"
 import { promisify } from "util"
 import { execFile } from "child_process"
 
@@ -11,18 +9,24 @@ import {
   createRunArtifact,
   listRunArtifacts,
   readInngestManagedRun,
+  touchRunHeartbeat,
   updateRunRecord,
   upsertTrackedStep,
 } from "@/lib/inngest-run-store"
 import { recordProjectRuntimeUpdated, recordRuntimeEvent } from "@/lib/runtime-events"
-import { loadWorkerEnv } from "@/lib/worker-env"
 import { buildRuntimeStateFromFinalJob, classifyWorkerOutcome } from "@/lib/worker-outcome"
 import { writeProjectRuntimeState, type ProjectRunTemplate, type RuntimeJob } from "@/lib/orchestration"
-import { ManagedRunCancelledError, clearActiveProcessPid, setActiveProcessPid, throwIfCancellationRequested } from "./cancellation"
+import { runWorkerAgent } from "@/lib/agent-runner"
+import { ManagedRunCancelledError, throwIfCancellationRequested } from "./cancellation"
 import { buildProjectTaskPrompt } from "./project-task-prompt"
 
 const execFileAsync = promisify(execFile)
-const codexPath = "/Applications/Codex.app/Contents/Resources/codex"
+const MAX_ARTIFACT_CHARS = 120_000
+
+function truncateArtifact(value: string, label: string) {
+  if (value.length <= MAX_ARTIFACT_CHARS) return value
+  return `${value.slice(0, MAX_ARTIFACT_CHARS)}\n\n[${label} truncated at ${MAX_ARTIFACT_CHARS.toLocaleString()} characters for runtime storage. Full detail remains in the worker/provider logs when available.]`
+}
 
 type SupportedProjectTaskTemplate = Exclude<ProjectRunTemplate, "continue_project" | "investigate_issue">
 
@@ -32,63 +36,6 @@ async function safeGit(projectDir: string, args: string[]) {
     return stdout.trim()
   } catch {
     return ""
-  }
-}
-
-async function runCodex(prompt: string, workingDirectory: string, runId: string) {
-  const outputDir = path.join(os.tmpdir(), "command-center-inngest")
-  await fs.mkdir(outputDir, { recursive: true })
-  const messagePath = path.join(outputDir, `${runId}.md`)
-  const logChunks: string[] = []
-  const workerEnv = await loadWorkerEnv(workingDirectory, process.env)
-  const nodeDir = path.dirname(process.execPath)
-  const currentPath = workerEnv.PATH || process.env.PATH || ""
-  const pathEntries = currentPath.split(path.delimiter).filter(Boolean)
-
-  const env = {
-    ...workerEnv,
-    PATH: [nodeDir, ...pathEntries.filter((entry) => entry !== nodeDir)].join(path.delimiter),
-  }
-
-  const exitCode = await new Promise<number>((resolve, reject) => {
-    const child = spawn(
-      codexPath,
-      [
-        "exec",
-        "--skip-git-repo-check",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--cd",
-        workingDirectory,
-        "--output-last-message",
-        messagePath,
-        prompt,
-      ],
-      {
-        cwd: workingDirectory,
-        env,
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    )
-    void setActiveProcessPid(runId, child.pid ?? null)
-
-    child.stdout?.on("data", (chunk) => {
-      logChunks.push(chunk.toString())
-    })
-    child.stderr?.on("data", (chunk) => {
-      logChunks.push(chunk.toString())
-    })
-    child.on("error", reject)
-    child.on("close", (code) => {
-      void clearActiveProcessPid(runId)
-      resolve(code ?? 1)
-    })
-  })
-
-  const messagePreview = await fs.readFile(messagePath, "utf8").catch(() => "")
-  return {
-    exitCode,
-    messagePreview,
-    logPreview: logChunks.join(""),
   }
 }
 
@@ -110,6 +57,7 @@ async function transitionRunStage(params: {
     started_at: params.status === "running" ? now : undefined,
     metadata: {
       stageUpdatedAt: now,
+      lastHeartbeatAt: now,
     },
   })
 
@@ -254,7 +202,37 @@ export const projectTaskFunction = inngest.createFunction(
 
       const execution = await tracked("execute-codex", "executing", async () => {
         const headBefore = await safeGit(workingDirectory, ["rev-parse", "HEAD"])
-        const result = await runCodex(prompt.prompt, workingDirectory, runId)
+        const liveActivity: string[] = []
+        let lastActivity = ""
+        let lastActivityWrite = 0
+        const recordActivity = async (line: string) => {
+          const cleaned = line.replace(/\s+/g, " ").trim()
+          if (!cleaned || cleaned === lastActivity) return
+          lastActivity = cleaned
+          liveActivity.push(`${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })} - ${cleaned}`)
+          const now = Date.now()
+          if (now - lastActivityWrite < 1500 && !/finished|error|failed/i.test(cleaned)) return
+          lastActivityWrite = now
+          await touchRunHeartbeat(runId).catch(() => null)
+          await createRunArtifact({
+            projectName,
+            runId,
+            artifactType: "commentary",
+            label: "Live agent activity",
+            content: liveActivity.slice(-20).join("\n"),
+            metadata: {
+              stage: "executing",
+              latestActivityAt: new Date().toISOString(),
+            },
+          }).catch(() => null)
+        }
+        await recordActivity("SDK worker started executing the approved assignment.")
+        const heartbeat = setInterval(() => {
+          void touchRunHeartbeat(runId).catch(() => null)
+        }, 30_000)
+        const result = await runWorkerAgent({ prompt: prompt.prompt, workingDirectory, runId, onActivity: recordActivity }).finally(() => {
+          clearInterval(heartbeat)
+        })
         const headAfter = await safeGit(workingDirectory, ["rev-parse", "HEAD"])
         const changedFiles =
           headAfter && headBefore && headAfter !== headBefore
@@ -295,7 +273,7 @@ export const projectTaskFunction = inngest.createFunction(
             runId,
             artifactType: "message_preview",
             label: "Final message",
-            content: execution.messagePreview,
+            content: truncateArtifact(execution.messagePreview, "Final message"),
           }),
         )
         created.push(
@@ -304,7 +282,7 @@ export const projectTaskFunction = inngest.createFunction(
             runId,
             artifactType: "execution_log",
             label: "Execution log",
-            content: execution.logPreview,
+            content: truncateArtifact(execution.logPreview, "Execution log"),
           }),
         )
         created.push(

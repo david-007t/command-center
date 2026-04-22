@@ -1,5 +1,6 @@
 import type { ChatThreadMessage } from "../chat-thread-messages"
 import type { ProjectStatus } from "../project-status"
+import type { ProjectReadiness } from "../project-readiness"
 
 export type Phase1ProjectStatusSnapshot = ProjectStatus
 
@@ -34,6 +35,7 @@ export type Phase1PortfolioProjectSnapshot = {
     compressionRatio?: number
     compactionRecommendedAction?: string
   } | null
+  readiness?: ProjectReadiness | null
   investigation?: {
     title: string
     summary: string
@@ -86,6 +88,7 @@ export type Phase1DashboardSnapshot = {
     statusLabel: string
     instruction: string
     createdAt: string
+    stageUpdatedAt?: string | null
     summary: string
     currentStage: string
   }>
@@ -123,83 +126,14 @@ export function mergeThreadMessagesPreservingRunEvents(
 }
 
 export function projectRowToProjectStatus(row: Phase1ProjectRow) {
-  return row.metadata.phase1?.projectStatus ?? projectSnapshotToProjectStatus(row) ?? null
+  return row.metadata.phase1?.projectStatus ?? null
 }
 
 export function projectRowToPageData(row: Phase1ProjectRow) {
   return {
-    projectStatus: row.metadata.phase1?.projectStatus ?? projectSnapshotToProjectStatus(row) ?? null,
+    projectStatus: row.metadata.phase1?.projectStatus ?? null,
     contextPack: row.metadata.phase1?.contextPack ?? null,
     usageSummary: row.metadata.phase1?.usageSummary ?? null,
-  }
-}
-
-function projectSnapshotToProjectStatus(row: Phase1ProjectRow): ProjectStatus | null {
-  const snapshot = row.metadata.phase1?.portfolioProject
-  if (!snapshot) return null
-
-  return {
-    name: snapshot.name,
-    phase: snapshot.phase,
-    progress: snapshot.progress,
-    blocker: snapshot.blocker,
-    nextAction: snapshot.nextAction,
-    launchTarget: snapshot.launchTarget,
-    sprintGoal: snapshot.nextAction,
-    inProgress: [],
-    blockedItems: snapshot.blocker && snapshot.blocker !== "None" ? [snapshot.blocker] : [],
-    upNext: snapshot.nextAction ? [snapshot.nextAction] : [],
-    latestHandoff: {
-      whatWorks: snapshot.latestHandoff || "No handoff recorded.",
-      whatIsBroken: snapshot.blocker || "No active blocker recorded.",
-      nextSteps: snapshot.nextAction ? [snapshot.nextAction] : [],
-    },
-    activeError: {
-      description: snapshot.blocker || "No active error recorded.",
-      impact: "No impact recorded.",
-    },
-    ceoDecision: null,
-    recommendedAction: {
-      template: "continue_project",
-      label: "Continue project",
-      reason: snapshot.nextAction || "Continue from the stored project state.",
-    },
-    investigation: snapshot.investigation
-      ? {
-          title: snapshot.investigation.title,
-          summary: snapshot.investigation.summary,
-          checks: [],
-          likelyCause: snapshot.investigation.likelyCause,
-          nextStep: snapshot.investigation.nextStep,
-          canAutofix: snapshot.investigation.canAutofix,
-          suggestedTemplate: "investigate_issue",
-          suggestedInstruction: snapshot.investigation.nextStep,
-        }
-      : null,
-    runtimeState: snapshot.runtimeState
-      ? {
-          projectName: snapshot.name,
-          jobId: "",
-          runTemplate: null,
-          status: "healthy",
-          statusLabel: snapshot.runtimeState.statusLabel,
-          summary: snapshot.runtimeState.summary,
-          governanceUpdated: true,
-          governanceTargets: [],
-          updatedTargets: [],
-          missingTargets: [],
-          completedAt: null,
-          messagePreview: snapshot.runtimeState.summary,
-          currentStage: snapshot.runtimeState.currentStage ?? null,
-          stageUpdatedAt: null,
-          trust: {
-            level: "inferred",
-            headline: "Loaded from Command Center cloud runtime state.",
-            checks: [],
-          },
-        }
-      : null,
-    jobs: [],
   }
 }
 

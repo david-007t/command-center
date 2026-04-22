@@ -1,5 +1,5 @@
-import { callRpc } from "@/lib/supabase/rpc"
-import { isSupabaseConfigured } from "@/lib/supabase/env"
+import { callRpc } from "./supabase/rpc"
+import { isSupabaseConfigured } from "./supabase/env"
 
 type SecretResolver = (name: string) => Promise<string | null>
 

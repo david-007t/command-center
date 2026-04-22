@@ -20,6 +20,18 @@ const FILES = [
   { label: "Security", file: "SECURITY_CHECKLIST.md" },
 ]
 
+async function readProjectTabs(developerPath: string, projectName: string) {
+  const entries = await Promise.all(
+    FILES.map(async (item) => {
+      const filePath = getProjectFilePath(developerPath, projectName, item.file)
+      const content = await fs.readFile(filePath, "utf8").catch(() => `${item.file} not found.`)
+      return [item.label, content] as const
+    }),
+  )
+
+  return Object.fromEntries(entries) as Record<string, string>
+}
+
 export async function loadProjectPageData(projectName: string) {
   const developerPath = process.env.DEVELOPER_PATH
   if (!developerPath) {
@@ -29,18 +41,14 @@ export async function loadProjectPageData(projectName: string) {
   if (isSupabaseConfigured()) {
     const stored = await readProjectPageDataFromStore(projectName, developerPath)
     if (stored?.projectStatus) {
-      const tabs: Record<string, string> = {}
-      for (const item of FILES) {
-        const filePath = getProjectFilePath(developerPath, projectName, item.file)
-        tabs[item.label] = await fs.readFile(filePath, "utf8").catch(() => `${item.file} is not available in the cloud runtime.`)
-      }
+      await fs.access(getProjectFilePath(developerPath, projectName, "TASKS.md"))
 
       return {
         projectStatus: stored.projectStatus,
         contextPack: stored.contextPack,
         usageSummary: stored.usageSummary,
         runnerAvailable: await isLocalWorkerRunnerAvailable(),
-        tabs,
+        tabs: await readProjectTabs(developerPath, projectName),
       }
     }
   }
@@ -48,11 +56,7 @@ export async function loadProjectPageData(projectName: string) {
   await syncSystemImprovements(developerPath).catch(() => null)
   await fs.access(getProjectFilePath(developerPath, projectName, "TASKS.md"))
 
-  const tabs: Record<string, string> = {}
-  for (const item of FILES) {
-    const filePath = getProjectFilePath(developerPath, projectName, item.file)
-    tabs[item.label] = await fs.readFile(filePath, "utf8").catch(() => `${item.file} not found.`)
-  }
+  const tabs = await readProjectTabs(developerPath, projectName)
 
   const [projectStatus, contextPack, usageSummary, runnerAvailable] = await Promise.all([
     getProjectStatus(projectName),

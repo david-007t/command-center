@@ -74,9 +74,17 @@ function formatStructuredBody(text: string) {
 }
 
 export function buildChatRunEvent(job: ChatRunJob, commentaryPreview: string, messagePreview: string): ChatRunEvent {
-  const finalBody = formatStructuredBody(messagePreview || commentaryPreview || job.summary)
+  const isFinal =
+    job.status === "completed" ||
+    job.status === "awaiting_ceo" ||
+    job.status === "blocked" ||
+    job.status === "blocked_on_config" ||
+    job.status === "failed" ||
+    job.status === "timed_out" ||
+    job.status === "cancelled"
+  const finalBody = formatStructuredBody(messagePreview || (isFinal ? job.summary : commentaryPreview) || commentaryPreview || job.summary)
 
-  if (job.status === "completed" || job.status === "awaiting_ceo" || job.status === "blocked" || job.status === "blocked_on_config" || job.status === "failed" || job.status === "timed_out" || job.status === "cancelled") {
+  if (isFinal) {
     return {
       jobId: job.id,
       chatThreadId: job.chatThreadId ?? null,

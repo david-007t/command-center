@@ -8,8 +8,6 @@ import { getProjectStatus } from "@/lib/project-status"
 import { readPortfolioFromStore } from "@/lib/runtime-store/phase1-store"
 import { isSupabaseConfigured } from "@/lib/supabase/env"
 
-export const dynamic = "force-dynamic"
-
 function toneForRuntime(status: string) {
   if (/healthy/i.test(status)) return "green"
   if (/awaiting_ceo/i.test(status)) return "purple"
