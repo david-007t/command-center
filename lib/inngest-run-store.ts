@@ -398,10 +398,11 @@ export async function expireStaleQueuedRuns(projectName?: string, now = new Date
       const metadata = run.metadata ?? {}
       const projectNameForArtifact = typeof metadata.projectName === "string" ? metadata.projectName : null
       const completedAt = now.toISOString()
+      const summary = "Worker launch timed out before Inngest picked it up. Retry the run."
       await updateRunRecord(run.id, {
         status: "timed_out",
         current_stage: "blocked",
-        summary: "Worker launch timed out before Inngest picked it up. Retry the run.",
+        summary,
         completed_at: completedAt,
         metadata: {
           stageUpdatedAt: completedAt,
@@ -409,6 +410,56 @@ export async function expireStaleQueuedRuns(projectName?: string, now = new Date
         },
       })
       if (projectNameForArtifact) {
+        const [project] = await selectRows<ProjectRow>("projects", {
+          select: "id,name,repo_path,metadata",
+          filters: { id: run.project_id },
+          limit: 1,
+        }).catch(() => [])
+        const projectMetadata = project?.metadata && typeof project.metadata === "object" ? project.metadata : {}
+        const runtimeState = {
+          projectName: projectNameForArtifact,
+          jobId: run.id,
+          runTemplate: run.run_template,
+          status: "blocked",
+          summary,
+          governanceUpdated: false,
+          governanceTargets: Array.isArray(metadata.governanceTargets) ? metadata.governanceTargets : [],
+          updatedTargets: [],
+          missingTargets: [],
+          completedAt,
+          messagePreview: summary,
+          currentStage: "blocked",
+          stageUpdatedAt: completedAt,
+        }
+        await updateRows(
+          "projects",
+          {
+            current_run_id: run.id,
+            runtime_status: "blocked",
+            runtime_summary: summary,
+            current_stage: "blocked",
+            governance_updated: false,
+            last_run_completed_at: completedAt,
+            metadata: {
+              ...projectMetadata,
+              runtimeState,
+              phase1: {
+                ...((projectMetadata.phase1 as Record<string, unknown> | undefined) ?? {}),
+                portfolioProject: {
+                  ...((((projectMetadata.phase1 as Record<string, unknown> | undefined)?.portfolioProject as Record<string, unknown> | undefined) ??
+                    {}) as Record<string, unknown>),
+                  runtimeState: {
+                    status: "blocked",
+                    statusLabel: "Blocked",
+                    summary,
+                    currentStage: "blocked",
+                  },
+                },
+              },
+            },
+          },
+          { id: run.project_id },
+        ).catch(() => [])
         await createRunArtifact({
           projectName: projectNameForArtifact,
           runId: run.id,

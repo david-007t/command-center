@@ -1,5 +1,5 @@
 import { promises as fs } from "fs"
-import { mapSupabaseRunToRuntimeJob, type SupabaseRunRow } from "@/lib/inngest-run-store"
+import { expireStaleActiveRuns, expireStaleQueuedRuns, mapSupabaseRunToRuntimeJob, type SupabaseRunRow } from "@/lib/inngest-run-store"
 import { readPortfolioProjectsWithCommandCenter, getPortfolioPath } from "@/lib/managed-projects"
 import { mapJobToOperationsRun, splitOperationsRuns, type OperationsRun } from "@/lib/operations-run-card"
 import { getDeveloperPath } from "@/lib/orchestration"
@@ -72,6 +72,13 @@ async function getFastOperationsJobs() {
 }
 
 export async function getOperationsLiveData(developerPath = getDeveloperPath()): Promise<OperationsLiveData> {
+  if (isSupabaseConfigured()) {
+    await Promise.all([
+      expireStaleQueuedRuns().catch(() => 0),
+      expireStaleActiveRuns().catch(() => 0),
+    ])
+  }
+
   const portfolioMarkdown = await fs.readFile(getPortfolioPath(developerPath), "utf8").catch(() => "")
   const [projects, jobs] = await Promise.all([
     readPortfolioProjectsWithCommandCenter(developerPath, portfolioMarkdown).catch(() => []),
