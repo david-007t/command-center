@@ -505,23 +505,68 @@ async function refreshStoredProjectRuntime<T extends ReturnType<typeof projectRo
       }
     }),
   )
+  const activeJob = enrichedJobs.find((job) => job.status === "running" || job.status === "queued")
+  const latestJob = enrichedJobs[0] ?? null
+  const matchedRuntimeJob = latestJob && projectStatus.runtimeState?.jobId === latestJob.id ? latestJob : null
+  const staleWorkerState = projectStatus.operatingState?.status === "worker_running" && !activeJob
+  const shouldCloseDisplayedRuntime =
+    staleWorkerState || Boolean(matchedRuntimeJob && matchedRuntimeJob.status !== "running" && matchedRuntimeJob.status !== "queued")
+  const normalizedProjectStatus = shouldCloseDisplayedRuntime && latestJob
+    ? {
+        ...projectStatus,
+        runtimeState: projectStatus.runtimeState
+          ? {
+              ...projectStatus.runtimeState,
+              status: latestJob.status === "awaiting_ceo" || latestJob.status === "completed" ? "awaiting_ceo" : "blocked",
+              statusLabel: latestJob.status === "awaiting_ceo" || latestJob.status === "completed" ? "Needs your decision" : "Blocked",
+              summary: latestJob.summary || projectStatus.runtimeState.summary,
+              completedAt: latestJob.completedAt ?? projectStatus.runtimeState.completedAt,
+              messagePreview: latestJob.summary || projectStatus.runtimeState.messagePreview,
+              currentStage: latestJob.currentStage ?? projectStatus.runtimeState.currentStage,
+              stageUpdatedAt: latestJob.stageUpdatedAt ?? projectStatus.runtimeState.stageUpdatedAt,
+            }
+          : projectStatus.runtimeState,
+        operatingState: {
+          status: latestJob.status === "awaiting_ceo" || latestJob.status === "completed" ? "pending_ceo_test" : "blocked",
+          label: latestJob.status === "awaiting_ceo" || latestJob.status === "completed" ? "Needs your decision" : "Blocked",
+          summary: latestJob.summary || "The latest worker is no longer active.",
+          nextAction:
+            latestJob.status === "awaiting_ceo" || latestJob.status === "completed"
+              ? "Review the latest worker result and test the product flow."
+              : "Retry the run if this assignment is still needed.",
+          blocker:
+            latestJob.status === "awaiting_ceo" || latestJob.status === "completed"
+              ? "Waiting on CEO review."
+              : latestJob.summary || "The latest worker is no longer active.",
+          tone: latestJob.status === "awaiting_ceo" || latestJob.status === "completed" ? "purple" : "red",
+        },
+      }
+    : projectStatus
   const resolvedDeploymentLinks = await getVercelDeploymentLinks({
-    projectName: projectStatus.name,
-    projectDir: resolveProjectDir(developerPath, projectStatus.name),
+    projectName: normalizedProjectStatus.name,
+    projectDir: resolveProjectDir(developerPath, normalizedProjectStatus.name),
   }).catch(() => ({ production: null, stage: null }))
   const deploymentLinks = mergeProjectDeploymentLinks({
-    existing: projectStatus.deploymentLinks,
+    existing: normalizedProjectStatus.deploymentLinks,
     resolved: resolvedDeploymentLinks,
     workerText: [
       ...enrichedJobs.flatMap((job) => [job.rawMessagePreview, job.messagePreview, job.executiveMessage, job.summary]),
-      projectStatus.runtimeState?.messagePreview,
-      projectStatus.runtimeState?.summary,
-      ...(projectStatus.jobs ?? []).flatMap((job) => [job.rawMessagePreview, job.messagePreview, job.executiveMessage, job.summary]),
+      normalizedProjectStatus.runtimeState?.messagePreview,
+      normalizedProjectStatus.runtimeState?.summary,
+      ...(normalizedProjectStatus.jobs ?? []).flatMap((job) => [job.rawMessagePreview, job.messagePreview, job.executiveMessage, job.summary]),
     ],
-    investigationUrl: projectStatus.investigation?.deploymentDetails?.url,
+    investigationUrl: normalizedProjectStatus.investigation?.deploymentDetails?.url,
   })
+  const refreshedProjectStatus = {
+    ...normalizedProjectStatus,
+    deploymentLinks,
+    jobs: enrichedJobs.length ? enrichedJobs : normalizedProjectStatus.jobs,
+  }
 
-  if (row && !deploymentLinksEqual(projectStatus.deploymentLinks ?? { production: null, stage: null }, deploymentLinks)) {
+  if (
+    row &&
+    (shouldCloseDisplayedRuntime || !deploymentLinksEqual(normalizedProjectStatus.deploymentLinks ?? { production: null, stage: null }, deploymentLinks))
+  ) {
     await updateRows(
       "projects",
       {
@@ -529,9 +574,22 @@ async function refreshStoredProjectRuntime<T extends ReturnType<typeof projectRo
           ...row.metadata,
           phase1: {
             ...(row.metadata.phase1 ?? {}),
-            projectStatus: {
-              ...projectStatus,
-              deploymentLinks,
+            projectStatus: refreshedProjectStatus,
+            portfolioProject: {
+              ...(row.metadata.phase1?.portfolioProject ?? {}),
+              runtimeState: refreshedProjectStatus.runtimeState
+                ? {
+                    status: refreshedProjectStatus.runtimeState.status,
+                    statusLabel: refreshedProjectStatus.runtimeState.statusLabel,
+                    summary: refreshedProjectStatus.runtimeState.summary,
+                    currentStage: refreshedProjectStatus.runtimeState.currentStage,
+                    trust: {
+                      level: refreshedProjectStatus.runtimeState.trust.level,
+                      headline: refreshedProjectStatus.runtimeState.trust.headline,
+                      checks: refreshedProjectStatus.runtimeState.trust.checks,
+                    },
+                  }
+                : null,
             },
           },
         },
@@ -540,11 +598,7 @@ async function refreshStoredProjectRuntime<T extends ReturnType<typeof projectRo
     ).catch(() => null)
   }
 
-  return {
-    ...projectStatus,
-    deploymentLinks,
-    jobs: enrichedJobs.length ? enrichedJobs : projectStatus.jobs,
-  } as T
+  return refreshedProjectStatus as T
 }
 
 async function listFastProjectJobs(projectName: string) {
